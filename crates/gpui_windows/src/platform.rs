@@ -117,7 +117,9 @@ impl WindowsPlatform {
         unsafe {
             OleInitialize(None).context("unable to initialize Windows OLE")?;
         }
-        let directx_devices = if !headless {
+        // The WGPU renderer owns its device and notices losing it, so it needs
+        // no DirectX devices.
+        let directx_devices = if !headless && !cfg!(feature = "wgpu") {
             Some(DirectXDevices::new().context("Creating DirectX devices")?)
         } else {
             None
@@ -242,6 +244,7 @@ impl WindowsPlatform {
             main_receiver: self.inner.main_receiver.clone(),
             platform_window_handle: self.handle,
             disable_direct_composition: self.disable_direct_composition,
+            #[cfg(not(feature = "wgpu"))]
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
             #[cfg(feature = "wgpu")]
             renderer_context: self.inner.state.renderer_context.clone(),
@@ -312,10 +315,9 @@ impl WindowsPlatform {
     }
 
     fn begin_vsync_thread(&self) {
-        let Some(directx_devices) = self.inner.state.directx_devices.borrow().clone() else {
-            return;
-        };
-        let mut directx_device = directx_devices;
+        // Without DirectX devices (the WGPU renderer), the thread still paces
+        // frames but has no device to watch.
+        let mut directx_devices = self.inner.state.directx_devices.borrow().clone();
         let platform_window: SafeHwnd = self.handle.into();
         let validation_number = self.inner.validation_number;
         let all_windows = Arc::downgrade(&self.raw_window_handles);
@@ -327,11 +329,12 @@ impl WindowsPlatform {
                 let vsync_provider = VSyncProvider::new();
                 loop {
                     vsync_provider.wait_for_vsync();
-                    if check_device_lost(&directx_device.device)
-                        || invalidate_devices.fetch_and(false, Ordering::Acquire)
+                    if let Some(directx_device) = directx_devices.as_mut()
+                        && (check_device_lost(&directx_device.device)
+                            || invalidate_devices.fetch_and(false, Ordering::Acquire))
                     {
                         if let Err(err) = handle_gpu_device_lost(
-                            &mut directx_device,
+                            directx_device,
                             platform_window.as_raw(),
                             validation_number,
                             &all_windows,
@@ -1211,6 +1214,7 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
     pub(crate) platform_window_handle: HWND,
     pub(crate) disable_direct_composition: bool,
+    #[cfg(not(feature = "wgpu"))]
     pub(crate) directx_devices: DirectXDevices,
     #[cfg(feature = "wgpu")]
     pub(crate) renderer_context: crate::wgpu_renderer::Context,
